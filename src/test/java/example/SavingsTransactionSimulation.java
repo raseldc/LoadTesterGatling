@@ -5,10 +5,9 @@ import io.gatling.javaapi.http.*;
 
 import java.sql.*;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 
 
@@ -23,10 +22,13 @@ public class SavingsTransactionSimulation extends Simulation {
     private static final String DB_PASS = "postgres";
     // Pre-load account IDs to avoid database queries during the test
     private static final List<Long> ACCOUNT_IDS = new ArrayList<>();
+    private Set<Long> accountAlreadyUsed = new HashSet<>();
+    private static final AtomicInteger accountIndex = new AtomicInteger(0);
+
     static {
         try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
              Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery("SELECT reference_id FROM savings_account LIMIT 2000")) {
+             ResultSet rs = stmt.executeQuery("SELECT distinct(reference_id) FROM savings_account LIMIT 50000 ")) {
 
             while (rs.next()) {
                 ACCOUNT_IDS.add(rs.getLong("reference_id"));
@@ -48,6 +50,7 @@ public class SavingsTransactionSimulation extends Simulation {
             .baseUrl("http://localhost:8080") // 🔁 replace with your target host
             .acceptHeader("application/json")
             .contentTypeHeader("application/json");
+
 
     private String getPayload(String uuid, long referenceId) {
         return String.format("""
@@ -85,7 +88,20 @@ public class SavingsTransactionSimulation extends Simulation {
             .exec(session -> {
                 String uuid = UUID.randomUUID().toString();
                 // Get a random account ID from our preloaded list
-                long savingsAccountId = ACCOUNT_IDS.get(ThreadLocalRandom.current().nextInt(ACCOUNT_IDS.size()));
+                int currentIndex = accountIndex.getAndIncrement();
+                long savingsAccountId = ACCOUNT_IDS.get(currentIndex % ACCOUNT_IDS.size());
+
+                while (accountAlreadyUsed.contains(savingsAccountId) && currentIndex < ACCOUNT_IDS.size()) {
+                    currentIndex = accountIndex.getAndIncrement();
+                    savingsAccountId = ACCOUNT_IDS.get(currentIndex);
+                }
+                if(currentIndex >= ACCOUNT_IDS.size()) {
+                    System.out.println("All accounts have been used.");
+                    return session;
+                }
+                accountAlreadyUsed.add(savingsAccountId);
+
+//                long savingsAccountId = ACCOUNT_IDS.get(ThreadLocalRandom.current().nextInt(ACCOUNT_IDS.size()));
                 return session.set("uuid", uuid)
                         .set("savingsAccountId", savingsAccountId);
 
@@ -98,15 +114,16 @@ public class SavingsTransactionSimulation extends Simulation {
                                     session.getLong("savingsAccountId")
                             )))
                             .asJson()
-                            .check(status().in(200,201).saveAs("responseStatus"))
-                            .check(bodyString().saveAs("responseBody"))
+                            .check(status().in(200,201))
+//                                    .saveAs("responseStatus"))
+                            //.check(bodyString().saveAs("responseBody"))
 
             )  ;
     {
         setUp(
                 scn.injectOpen(
-                        rampUsers(2000).during(Duration.ofSeconds(30)),  // Ramp up to 2000 users over 30 seconds
-                        constantUsersPerSec(100).during(Duration.ofMinutes(1)).randomized()  // Steady phase
+//                        rampUsers(2000).during(Duration.ofSeconds(30)),  // Ramp up to 2000 users over 30 seconds
+                        constantUsersPerSec(500).during(Duration.ofMinutes(5)).randomized()  // Steady phase
                 )
         ).protocols(httpProtocol)
                 .maxDuration(Duration.ofMinutes(1))
